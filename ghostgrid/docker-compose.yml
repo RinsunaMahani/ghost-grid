@@ -1,0 +1,82 @@
+services:
+  # 1. GhostGrid OT Decoy (Modbus TCP server + physics simulation + background director)
+  ghostgrid-decoy:
+    build:
+      context: .
+      dockerfile: Dockerfile.decoy
+    container_name: ghostgrid-decoy
+    restart: unless-stopped
+    ports:
+      # Exposed to OT network / monitored segment
+      - "502:502"
+    environment:
+      - MODBUS_HOST=0.0.0.0
+      - MODBUS_PORT=502
+      - MODBUS_UNIT_ID=1
+      - GHOSTGRID_DB_PATH=/data/ghostgrid_soc.db
+      - GHOSTGRID_STATE_PATH=/data/ghostgrid_state.json
+      - GHOSTGRID_IDENTITY_PATH=/data/ghostgrid_identity.json
+      - DIRECTOR_PROVIDER=ollama
+      - DIRECTOR_ENDPOINT=http://ghostgrid-llm:11434
+      - DIRECTOR_MODEL=qwen2.5:1.5b
+    volumes:
+      - shared-data:/data
+      - ./config:/app/ghostgrid/config:ro
+    networks:
+      - ot-network
+      - internal-ai-network
+    depends_on:
+      - ghostgrid-llm
+
+  # 2. GhostGrid SOC Dashboard (Streamlit Web Interface)
+  # Restricted to management network and bound to loopback only (127.0.0.1)
+  ghostgrid-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: ghostgrid-dashboard
+    restart: unless-stopped
+    ports:
+      # Bound strictly to loopback/management interface to prevent network discovery
+      - "127.0.0.1:8501:8501"
+    environment:
+      - GHOSTGRID_DB_PATH=/data/ghostgrid_soc.db
+      - GHOSTGRID_STATE_PATH=/data/ghostgrid_state.json
+      - GHOSTGRID_IDENTITY_PATH=/data/ghostgrid_identity.json
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - GHOSTGRID_ADMIN_PASSWORD=${GHOSTGRID_ADMIN_PASSWORD}
+    volumes:
+      - shared-data:/data:ro
+      - ./config:/app/ghostgrid/config:ro
+    networks:
+      - management-network
+    depends_on:
+      - ghostgrid-decoy
+
+  # 3. Local AI Model Runtime (Ollama for background scenario direction)
+  # STRICTLY internal: no host ports mapped to prevent adversary enumeration
+  ghostgrid-llm:
+    image: ollama/ollama:latest
+    container_name: ghostgrid-llm
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - internal-ai-network
+
+networks:
+  ot-network:
+    driver: bridge
+  management-network:
+    driver: bridge
+    internal: false
+  internal-ai-network:
+    driver: bridge
+    internal: true
+
+volumes:
+  shared-data:
+    driver: local
+  ollama-data:
+    driver: local

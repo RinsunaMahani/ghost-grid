@@ -1,0 +1,38 @@
+# GhostGrid runtime artifacts & databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+ghostgrid_state.json
+ghostgrid_identity.json
+ghostgrid_soc.db
+*.tmp
+*.log
+
+# Databox sealed storage artifacts & encryption keys
+vault-data/
+*.vault/
+databox/.monitor/
+vault.key
+*.key
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache & test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Environment & credentials
+.env
+.env.*

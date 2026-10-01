@@ -1,0 +1,54 @@
+# GhostGrid Site Configuration Template
+# NEVER ship default credentials, real utility names, or fixed register maps in production.
+# Leave site and device fields blank (null) to have GhostGrid procedurally generate
+# a unique, randomized facility identity, device serial, and register map upon install.
+
+site:
+  # Optional explicit site name. Leave null to procedurally generate a realistic neutral identity.
+  name: null
+  facility_type: null               # e.g., water_treatment, distribution_substation (null = auto)
+  sector: "water"                   # Primary profile: water or power
+  country: "ZA"
+  region: "Gauteng"
+  location_code: null               # Optional location identifier (null = auto-generated)
+  security_zone: "OT-PMR-L2"
+
+network:
+  modbus:
+    host: "0.0.0.0"
+    port: 502                       # Default Modbus TCP port (use 1502 for unprivileged testing)
+    unit_id: 1                      # Modbus Unit ID (1-247)
+    allow_broadcast: false          # Reject or accept broadcast unit ID 0
+    response_delay_ms: 2            # Realistic PLC processing delay (1-5ms)
+
+device:
+  # Leave null to procedurally select a vendor, model, firmware, serial and vendor-matched MAC
+  vendor: null                      # e.g., Schneider Electric, ABB, WAGO, Moxa
+  model: null                       # e.g., Modicon M580, RTU560
+  firmware_version: null
+  serial_number: null
+
+director:
+  enabled: true
+  provider: "mock"                  # Options: ollama, openai, mock (mock provides realistic offline storylines)
+  model: "qwen2.5:1.5b"            # Model name if provider is ollama
+  endpoint: "http://localhost:11434"
+  interval_seconds: 60              # Frequency of background storyline updates
+  hardened_prompts: true            # Never inject raw attacker payloads into LLM context
+
+simulation:
+  tick_interval_seconds: 1.0        # Physics update rate
+  noise_amplitude: 0.02             # Stochastic sensor noise level
+  auto_recovery: false              # If true, state recovers to nominal after unauthorized trip
+
+logging:
+  db_path: "ghostgrid_soc.db"
+  log_level: "INFO"                 # DEBUG, INFO, WARNING, ERROR
+  alert_threshold_writes: 1         # Alert on first write operation
+  alert_threshold_scans: 10         # Alert on sequential register reads
+  honeytoken_registers: [40099, 40100, 40101] # Registers monitored as honeytoken traps
+
+dashboard:
+  port: 8501
+  theme: "dark"
+  refresh_interval_seconds: 2
