@@ -1,11 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ghost-grid"
 version = "0.1.0"
 description = "GhostGrid decoy and the Sealed Data Box simulation"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = ["cryptography>=42"]
+
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+# pip install -e ".[ghostgrid]"   the decoy and its SOC console
+# (Streamlit 1.52 is the first with on-click downloads, which the SOC console's evidence export uses.)
+ghostgrid = ["pyyaml>=6.0", "requests>=2.28", "streamlit>=1.52", "pandas>=2.0", "altair>=5.0"]
+# pip install -e ".[live-view]"   the data box's live browser view
+live-view = ["streamlit>=1.52"]
+dev = ["pytest>=8", "ruff>=0.6"]
+# pip install -e ".[all]"         everything, including the tests
+all = ["ghost-grid[ghostgrid,live-view,dev]"]
+
+[tool.setuptools.packages.find]
+include = ["ghostgrid*", "databox*"]
+
+[tool.setuptools.package-data]
+ghostgrid = ["config/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["ghostgrid/tests", "databox/tests"]
 pythonpath = ["."]

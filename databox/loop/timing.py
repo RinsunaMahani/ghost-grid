@@ -11,10 +11,14 @@ from statistics import median
 class LapTimer:
     """Learns what a normal lap looks like, then flags laps that take far longer."""
 
-    def __init__(self, learn: int = 20, factor: float = 4.0, floor_ms: float = 20.0):
+    def __init__(self, learn: int = 20, factor: float = 4.0, floor_ms: float = 50.0):
         self.learn = learn
         self.factor = factor
-        self.floor_ms = floor_ms     # ignore jitter below this, however fast the baseline
+        # Ignore jitter below this, however fast the baseline. In this simulation the "fibre" is
+        # Python threads on one computer, and a busy laptop (screen sharing during a demo, say)
+        # stalls them for 30-40 ms now and then. 50 ms clears that while a 150 ms relay tap is
+        # still three times over. Real hardware laps take microseconds and can use a far lower floor.
+        self.floor_ms = floor_ms
         self._samples: list[float] = []
         self.baseline_ms: float | None = None
 

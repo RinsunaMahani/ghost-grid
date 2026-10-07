@@ -191,12 +191,19 @@ def _generate_mac(vendor: str, seed_str: str) -> str:
 
 
 def _assign_randomized_addresses(tag_keys: List[str], base_range: range, rng: random.Random) -> Dict[str, int]:
-    """Assign non-overlapping randomized addresses to tags within a register block."""
+    """Assign non-overlapping addresses inside a register block, different for every install.
+
+    Both the set of occupied addresses and which tag sits where vary per seed, so a scanner
+    mapping which addresses answer sees a different layout on each decoy. The gaps between
+    tags look like the spare/reserved registers real PLC maps have.
+    """
     count = len(tag_keys)
-    step = max(1, len(base_range) // count)
-    slots = list(base_range)[::step][:count]
-    rng.shuffle(slots)
-    return {k: slots[i] for i, k in enumerate(tag_keys)}
+    if count > len(base_range):
+        raise ValueError(f"block {base_range} is too small for {count} tags")
+    slots = sorted(rng.sample(list(base_range), count))
+    order = list(tag_keys)
+    rng.shuffle(order)
+    return dict(zip(order, slots))
 
 
 def _build_water_tags(rng: random.Random) -> Dict[str, TagDefinition]:

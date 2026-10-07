@@ -20,6 +20,9 @@ network:
     unit_id: 1                      # Modbus Unit ID (1-247)
     allow_broadcast: false          # Reject or accept broadcast unit ID 0
     response_delay_ms: 2            # Realistic PLC processing delay (1-5ms)
+    max_clients: 64                 # Connections open at once; more are refused, as a full PLC would
+    max_clients_per_ip: 16          # So one address can't take every slot
+    idle_timeout_s: 1800            # Close a connection silent this long (long on purpose: visitors should stay)
 
 device:
   # Leave null to procedurally select a vendor, model, firmware, serial and vendor-matched MAC
@@ -47,6 +50,15 @@ logging:
   alert_threshold_writes: 1         # Alert on first write operation
   alert_threshold_scans: 10         # Alert on sequential register reads
   honeytoken_registers: [40099, 40100, 40101] # Registers monitored as honeytoken traps
+  # Forward every alert to the SOC's own tools as it happens. Both outputs are optional (empty = off).
+  # Environment variables override these: GHOSTGRID_ALERTS_JSONL, GHOSTGRID_SYSLOG_HOST,
+  # GHOSTGRID_SYSLOG_PORT, GHOSTGRID_SYSLOG_FORMAT and GHOSTGRID_DECOY_NAME.
+  siem:
+    jsonl_path: ""                  # e.g. /data/ghostgrid_alerts.jsonl, for Filebeat, a Wazuh agent or Fluent Bit
+    syslog_host: ""                 # SIEM or syslog collector; UDP is send-only, so it can cross a data diode
+    syslog_port: 514
+    syslog_format: "json"           # json, or cef (Common Event Format, read natively by most SIEMs)
+    decoy_name: ""                  # how this decoy is named in the SIEM (default: the machine's host name)
 
 dashboard:
   port: 8501

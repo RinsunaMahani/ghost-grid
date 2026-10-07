@@ -29,7 +29,7 @@ High-fidelity operational technology (OT) deception platform designed for critic
    - Read-only SQLite dashboard mode prevents write lock contention or crashes on read-only container mounts; all database queries automatically close connections immediately.
 
 5. **Hardened Scenario Director & Management Isolation**:
-   - Background autonomous AI/offline scenario director strictly prevented from flipping command coils or safety trips (`PUMP_1_CMD`, `EMERGENCY_SHUTDOWN_CMD`, breakers).
+   - Background autonomous AI/offline scenario director limited to an allow-list of operational setpoints, each within a plausible range (`core/director/limits.py`). Commands, trips, alarm limits and protection settings are off limits, so a storyline can never cause a trip, directly or through a setting.
    - Holding register setpoints actively drive physical simulation behavior.
    - Docker Compose isolates local AI model on an internal bridge network (`internal: true`).
    - SOC screen bound strictly to `127.0.0.1` behind an operator password barrier (`GHOSTGRID_ADMIN_PASSWORD`).
@@ -60,16 +60,44 @@ export GHOSTGRID_ADMIN_PASSWORD="your-strong-operator-password"
 docker compose up -d
 ```
 
-- **Modbus TCP**: Port `502` (Decoy service on `ot-network`)
+- **Modbus TCP**: Port `502` (Decoy service on `ot-network`; inside the container it listens on 5020, because it runs as an unprivileged user)
 - **SOC Dashboard**: `http://127.0.0.1:8501` (Restricted to loopback/management network)
 - **Local AI Runtime (Ollama)**: Running on `internal-ai-network` (isolated, no host ports exposed)
+
+#### Container hardening
+The decoy is the one service visitors talk to, so both GhostGrid containers run locked down: an unprivileged user (UID 10001), a read-only filesystem except the `/data` volume, no Linux capabilities, `no-new-privileges`, and fixed memory, CPU and process limits. Even a bug in the decoy would land a visitor in a box where they can do very little.
+
+The Modbus server also limits connections. It allows 64 open connections in total and 16 from one address, and closes a connection that stays silent for 30 minutes. A full real PLC also refuses new connections. All three limits are set in `network.modbus` in the site config.
+
+#### Sending alerts to your SIEM
+A SOC works in its SIEM, not in a separate console, so the decoy can forward every alert the moment it is recorded. There are two outputs, and you can use either or both:
+
+- **Syslog over UDP** (RFC 5424) to a collector, with the alert as JSON or as **CEF**, which Splunk, QRadar, ArcSight, Microsoft Sentinel and Wazuh read natively. UDP only ever sends, so the feed can cross a one-way data diode into the SOC network without giving anyone on the OT side a way back.
+- **A JSON Lines file**, one alert per line, for a log shipper such as Filebeat, Fluent Bit or a Wazuh agent. Rotate it with your usual log rotation.
+
+Each alert carries the time (UTC), severity, alarm type, ATT&CK for ICS technique, source address and port, session ID, decoy name and description. Set it up in `logging.siem` in the site config, or with the environment variables shown in `docker-compose.yml`. A collector that can't be reached is reported once in the decoy's log and never slows the decoy down. The SQLite database stays the primary record either way.
+
+To check it works before involving a real SIEM, run the stand-in listener and point the decoy at it:
+
+```bash
+python -m ghostgrid.siem_listen --port 5514          # prints each alert as it arrives
+GHOSTGRID_SYSLOG_HOST=127.0.0.1 GHOSTGRID_SYSLOG_PORT=5514 GHOSTGRID_SYSLOG_FORMAT=cef \
+  python -m ghostgrid.run_decoy --sector water --port 1502
+```
+
+#### The Ollama image is pinned
+An air-gapped site shouldn't drift to whatever `latest` was on the day of the pull, so `docker-compose.yml` pins Ollama 0.40.0 by its registry digest. The digest guarantees the identical image even if the tag were moved. To upgrade, look up the new release's digest and set it in `ghostgrid/.env`:
+```bash
+docker buildx imagetools inspect ollama/ollama:<version>    # copy the top "Digest:" line
+# ghostgrid/.env:   OLLAMA_IMAGE=ollama/ollama:<version>@sha256:...
+```
 
 #### Preloading the Local AI Model (Ollama)
 Because the `ghostgrid-llm` container is strictly air-gapped on an internal Docker bridge network (`internal: true` with no external gateway), Ollama cannot pull models over the internet inside the container.
 
 To load the model into the persistent volume, use a temporary Ollama container on the default network (which can reach the internet), then remove it. Run this once, from the `ghostgrid` folder, before `docker compose up`:
 ```bash
-docker run -d --name ollama-preload -v ghostgrid_ollama-data:/root/.ollama ollama/ollama:latest
+docker run -d --name ollama-preload -v ghostgrid_ollama-data:/root/.ollama ollama/ollama:0.40.0@sha256:1bef639749741b375e9a1eb2c1346fb57ce52f5432de1f74846e44ccc18e1687
 docker exec ollama-preload ollama pull qwen2.5:1.5b
 docker rm -f ollama-preload
 ```

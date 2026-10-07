@@ -17,6 +17,21 @@ A sealed, battery-powered box that holds a site's critical records. It is watche
 - Research: [docs/research-single-box.md](docs/research-single-box.md)
 - Status: software simulation working, with a live browser view. See [databox/README.md](databox/README.md)
 
+## Setup
+
+From the repository root, with Python 3.11 or newer:
+
+```
+pip install -e ".[all]"     # everything; or ".[ghostgrid]", ".[live-view]" or ".[dev]" for one part
+python -m pytest            # all tests for both projects
+```
+
+The tests also run on GitHub for every push (`.github/workflows/tests.yml`).
+
+## How it all fits together
+
+[docs/how-it-works.md](docs/how-it-works.md) explains both projects end to end: what each part does, how the parts connect, and why they were built that way. [docs/demo-runbook.md](docs/demo-runbook.md) is a seven-minute live demo of both, with the commands, what to point at, and likely questions.
+
 ## Background
 
 - [docs/sa-landscape.md](docs/sa-landscape.md): what South Africa already has, and where each plan fits.

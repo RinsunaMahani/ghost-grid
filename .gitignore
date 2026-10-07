@@ -7,6 +7,8 @@
 ghostgrid_state.json
 ghostgrid_identity.json
 ghostgrid_soc.db
+# Forwarded alert files (real alert data) and vault manifests
+*.jsonl
 *.tmp
 *.log
 
@@ -27,6 +29,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 dist/

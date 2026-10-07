@@ -1,7 +1,7 @@
 """Base profile interfaces and registry for GhostGrid sector physics."""
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
-from ghostgrid.core.identity import SiteIdentity, TagDefinition
+from typing import Dict, Any
+from ghostgrid.core.identity import SiteIdentity
 
 
 class SectorProfile(ABC):

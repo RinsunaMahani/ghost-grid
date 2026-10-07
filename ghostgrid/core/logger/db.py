@@ -20,7 +20,9 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
+
+from ghostgrid.core.logger.forward import AlertForwarder
 
 logger = logging.getLogger("ghostgrid.logger")
 
@@ -81,6 +83,7 @@ class EventLogger:
         honeytoken_registers: Optional[List[int]] = None,
         read_only: bool = False,
         cleanup_stale_sessions: bool = False,
+        alert_forwarder: Optional[AlertForwarder] = None,
     ):
         self.db_path = db_path
         self.alert_threshold_writes = alert_threshold_writes
@@ -88,9 +91,12 @@ class EventLogger:
         self.honeytoken_registers = honeytoken_registers or [40099, 40100, 40101]
         self.read_only = read_only
         self.cleanup_stale_sessions = cleanup_stale_sessions
+        # Sends each alert to the SOC's SIEM once it is committed; never used in read-only mode.
+        self.alert_forwarder = None if read_only else alert_forwarder
 
         # Per-IP alert state for the current visit, kept across reconnections
         self._visits: Dict[str, Dict[str, Any]] = {}
+        self._visits_swept_at = 0.0
 
         self._queue: queue.Queue = queue.Queue()
         self._running = not read_only
@@ -215,8 +221,28 @@ class EventLogger:
     def _batch_writer_loop(self):
         """Dedicated background thread executing batched SQLite transactions."""
         conn = self._create_raw_connection()
+        peers: Dict[str, Tuple[str, int]] = {}    # session -> (client ip, port), for forwarded alerts
+        outgoing: List[Dict[str, Any]] = []        # alerts to forward once the current batch is committed
+
+        def raise_alert(cursor, s_id, now, severity, alert_type, mitre, description):
+            cursor.execute("""
+                INSERT INTO alerts (session_id, timestamp, severity, alert_type, mitre_technique, description)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (s_id, now, severity, alert_type, mitre, description))
+            if self.alert_forwarder is None:
+                return
+            if s_id not in peers:                  # a session from before a restart: look it up
+                row = cursor.execute("SELECT client_ip, client_port FROM sessions WHERE session_id = ?",
+                                     (s_id,)).fetchone()
+                peers[s_id] = (row["client_ip"], row["client_port"]) if row else (None, None)
+            ip, port = peers[s_id]
+            outgoing.append({"session_id": s_id, "timestamp": now, "severity": severity,
+                             "alert_type": alert_type, "mitre_technique": mitre,
+                             "description": description, "client_ip": ip, "client_port": port})
+
         while self._running or not self._queue.empty():
             items = []
+            outgoing.clear()
             try:
                 first = self._queue.get(timeout=0.2)
                 items.append(first)
@@ -242,13 +268,11 @@ class EventLogger:
                                 total_requests, total_writes, time_gained_seconds, is_active
                             ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0.0, 1)
                         """, (s_id, ip, port, uid, now, now))
-                        cursor.execute("""
-                            INSERT INTO alerts (session_id, timestamp, severity, alert_type, mitre_technique, description)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, (
-                            s_id, now, "HIGH", "FIRST_CONTACT", "T0846: Remote System Discovery",
+                        peers[s_id] = (ip, port)
+                        raise_alert(
+                            cursor, s_id, now, "HIGH", "FIRST_CONTACT", "T0846: Remote System Discovery",
                             f"Unauthorized Modbus TCP connection initiated from {ip}:{port} to Unit ID {uid}."
-                        ))
+                        )
 
                     elif action == "log_request":
                         s_id, now, fc, fname, addr, cnt, vals_str, lat, status, tag, is_ht, is_wr = payload
@@ -269,25 +293,19 @@ class EventLogger:
                         """, (now, 1 if is_wr else 0, now, s_id))
 
                         if is_ht:
-                            cursor.execute("""
-                                INSERT INTO alerts (session_id, timestamp, severity, alert_type, mitre_technique, description)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                            """, (
-                                s_id, now, "CRITICAL", "HONEYTOKEN_TRIGGER",
-                                "T0836: Modify Parameter / T0859: Valid Accounts",
+                            raise_alert(
+                                cursor, s_id, now, "CRITICAL", "HONEYTOKEN_TRIGGER",
+                                # A read maps the plant's points; a write changes one.
+                                "T0836: Modify Parameter" if is_wr else "T0861: Point & Tag Identification",
                                 f"CRITICAL: Attacker touched honeytoken register/tag '{tag or addr}' via {fname}! Reconnaissance trap sprung."
-                            ))
-
+                            )
 
                     elif action == "alert":
-                        s_id, now, sev, a_type, mitre, desc = payload
-                        cursor.execute("""
-                            INSERT INTO alerts (session_id, timestamp, severity, alert_type, mitre_technique, description)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, (s_id, now, sev, a_type, mitre, desc))
+                        raise_alert(cursor, *payload)
 
                     elif action == "end_session":
                         s_id, now, reason = payload
+                        peers.pop(s_id, None)
                         cursor.execute("""
                             UPDATE sessions
                             SET is_active = 0,
@@ -305,6 +323,13 @@ class EventLogger:
                         """, (now, title, narrative, adj_str))
 
                 conn.commit()
+                # Only alerts that are safely recorded go to the SIEM.
+                if self.alert_forwarder is not None:
+                    for alert in outgoing:
+                        try:
+                            self.alert_forwarder.forward(alert)
+                        except Exception as e:     # forwarding must never stop the writer thread
+                            logger.error("Alert forwarding failed: %s", e)
             except Exception as e:
                 logger.error("Error committing batched DB entries: %s", e, exc_info=True)
             finally:
@@ -366,6 +391,7 @@ class EventLogger:
         """
         visit = self._visits.get(client_ip)
         if visit is None or now - visit["last_seen"] > VISIT_GAP_SECONDS:
+            self._forget_ended_visits(now)
             visit = {"requests": 0, "writes": 0, "scan_alerted": False, "tags_alerted": set()}
             self._visits[client_ip] = visit
         visit["last_seen"] = now
@@ -393,6 +419,17 @@ class EventLogger:
                      f"(write {visit['writes']} this visit).")
                 ))
 
+    def _forget_ended_visits(self, now: float) -> None:
+        """Drop visits that have ended, so a decoy running for months doesn't keep an entry per address forever.
+
+        Runs at most once a minute; an ended visit would be replaced by a fresh one on return anyway.
+        """
+        if now - self._visits_swept_at < 60.0:
+            return
+        self._visits_swept_at = now
+        for ip in [ip for ip, v in self._visits.items() if now - v["last_seen"] > VISIT_GAP_SECONDS]:
+            del self._visits[ip]
+
     def end_session(self, session_id: str, reason: str = "Client disconnected"):
         """Mark a session as completed (non-blocking)."""
         if not self.read_only:
@@ -417,6 +454,8 @@ class EventLogger:
             self.flush()
             if self._worker_thread and self._worker_thread.is_alive():
                 self._worker_thread.join(timeout=2.0)
+            if self.alert_forwarder is not None:
+                self.alert_forwarder.close()
 
     # --------------------------------------------------------------------------
     # SOC Metrics & Dashboard Queries
@@ -425,7 +464,6 @@ class EventLogger:
     def get_soc_metrics(self) -> Dict[str, Any]:
         """Compute aggregate SOC metrics including Time Gained clustered by visits."""
         self.flush()
-        now = time.time()
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
@@ -533,13 +571,18 @@ class EventLogger:
                 return []
 
     def get_all_sessions(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Newest sessions first, with their duration and how many requests touched a honeytoken."""
         self.flush()
         with self._get_connection() as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute("""
-                    SELECT * FROM sessions
-                    ORDER BY started_at DESC
+                    SELECT s.*,
+                           MAX(0.0, s.last_seen - s.started_at) AS duration_seconds,
+                           (SELECT COUNT(*) FROM requests r
+                             WHERE r.session_id = s.session_id AND r.is_honeytoken = 1) AS honeytoken_hits
+                    FROM sessions s
+                    ORDER BY s.started_at DESC
                     LIMIT ?
                 """, (limit,))
                 return [dict(r) for r in cursor.fetchall()]

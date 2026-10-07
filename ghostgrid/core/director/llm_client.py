@@ -9,6 +9,8 @@ import logging
 import requests
 from typing import Dict, Any, Optional
 
+from ghostgrid.core.director.limits import ADJUSTABLE_SETPOINTS
+
 logger = logging.getLogger("ghostgrid.director")
 
 # Neutral South African operational narratives
@@ -49,7 +51,8 @@ NEUTRAL_POWER_STORYLINES = [
     {
         "title": "Grid Frequency Stabilization Cycle",
         "narrative": "National system frequency experienced transient excursion due to regional generator trip. Secondary frequency regulation active.",
-        "adjustments": {"UNDERFREQ_LOADSHED_STAGE1_HZ": 4920},
+        # Narrative only: under-frequency load-shed settings are protection settings, not operations.
+        "adjustments": {},
     },
     {
         "title": "Transformer Night Cooling Cycle",
@@ -100,9 +103,13 @@ class LLMClient:
     ) -> Optional[Dict[str, Any]]:
         url = f"{self.endpoint}/api/generate"
 
+        # The same ranges the director enforces, so a suggestion can actually be applied.
+        choices = "; ".join(f"{name} {low}-{high}"
+                            for name, (low, high) in ADJUSTABLE_SETPOINTS.get(sector, {}).items())
         system_prompt = (
             f"You are the SCADA Operations AI Director for a {sector} facility in South Africa called '{site_name}'. "
             "Write a brief 1-sentence believable daily SCADA log entry explaining routine operations. "
+            f'You may include one small setpoint change in "adjustments", using only these tags and raw values: {choices}. '
             'Return JSON only: {"title": "string", "narrative": "string", "adjustments": {}}'
         )
 

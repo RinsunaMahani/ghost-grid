@@ -12,6 +12,9 @@ class ModbusConfig:
     unit_id: int = 1
     allow_broadcast: bool = False
     response_delay_ms: int = 2
+    max_clients: int = 64
+    max_clients_per_ip: int = 16
+    idle_timeout_s: float = 1800.0
 
 
 @dataclass
@@ -46,6 +49,12 @@ class LoggingConfig:
     alert_threshold_writes: int = 1
     alert_threshold_scans: int = 10
     honeytoken_registers: List[int] = field(default_factory=lambda: [40099, 40100, 40101])
+    # Forwarding alerts to the SOC's SIEM (empty = off)
+    alerts_jsonl_path: str = ""
+    syslog_host: str = ""
+    syslog_port: int = 514
+    syslog_format: str = "json"
+    decoy_name: str = ""
 
 
 @dataclass
@@ -95,6 +104,7 @@ def load_config(config_path: Optional[str] = None) -> GhostGridConfig:
     dir_sec = data.get("director", {}) or {}
     sim_sec = data.get("simulation", {}) or {}
     log_sec = data.get("logging", {}) or {}
+    siem_sec = log_sec.get("siem", {}) or {}
 
     ft_sector = str(site_sec.get("sector") or "water").lower()
 
@@ -112,6 +122,9 @@ def load_config(config_path: Optional[str] = None) -> GhostGridConfig:
             unit_id=int(os.environ.get("MODBUS_UNIT_ID", net_sec.get("unit_id", 1))),
             allow_broadcast=bool(net_sec.get("allow_broadcast", False)),
             response_delay_ms=int(net_sec.get("response_delay_ms", 2)),
+            max_clients=int(net_sec.get("max_clients", 64)),
+            max_clients_per_ip=int(net_sec.get("max_clients_per_ip", 16)),
+            idle_timeout_s=float(net_sec.get("idle_timeout_s", 1800.0)),
         ),
         device=DeviceConfig(
             vendor=dev_sec.get("vendor") or None,
@@ -138,6 +151,11 @@ def load_config(config_path: Optional[str] = None) -> GhostGridConfig:
             alert_threshold_writes=int(log_sec.get("alert_threshold_writes", 1)),
             alert_threshold_scans=int(log_sec.get("alert_threshold_scans", 10)),
             honeytoken_registers=list(log_sec.get("honeytoken_registers", [40099, 40100, 40101])),
+            alerts_jsonl_path=os.environ.get("GHOSTGRID_ALERTS_JSONL", siem_sec.get("jsonl_path") or ""),
+            syslog_host=os.environ.get("GHOSTGRID_SYSLOG_HOST", siem_sec.get("syslog_host") or ""),
+            syslog_port=int(os.environ.get("GHOSTGRID_SYSLOG_PORT", siem_sec.get("syslog_port", 514))),
+            syslog_format=os.environ.get("GHOSTGRID_SYSLOG_FORMAT", siem_sec.get("syslog_format") or "json").lower(),
+            decoy_name=os.environ.get("GHOSTGRID_DECOY_NAME", siem_sec.get("decoy_name") or ""),
         ),
         raw_data=data,
     )

@@ -148,6 +148,37 @@ class TestLoggerAndMetrics(unittest.TestCase):
             write("PUMP_1_CMD")
             self.assertEqual(write_alert_count(), 4, "a new visit after a quiet gap must alert again")
 
+    def test_ended_visits_are_forgotten_so_memory_stays_bounded(self):
+        """A long-running decoy must not keep a visit entry for every address it has ever seen."""
+        from types import SimpleNamespace
+        from unittest import mock
+        import ghostgrid.core.logger.db as db_module
+
+        clock = [2_000_000.0]
+        with mock.patch.object(db_module, "time", SimpleNamespace(time=lambda: clock[0])):
+            for i in range(50):
+                ip = f"10.9.0.{i}"
+                s = self.logger.start_session(ip, 40000 + i, 1)
+                self.logger.log_request(s, 3, "Read", 0, 1, [1], 0.1, "SUCCESS", client_ip=ip)
+            self.assertEqual(len(self.logger._visits), 50)
+
+            clock[0] += db_module.VISIT_GAP_SECONDS + 120.0      # all 50 visits have ended
+            s = self.logger.start_session("10.9.1.1", 41000, 1)
+            self.logger.log_request(s, 3, "Read", 0, 1, [1], 0.1, "SUCCESS", client_ip="10.9.1.1")
+            self.assertEqual(list(self.logger._visits), ["10.9.1.1"])
+
+    def test_honeytoken_alert_technique_follows_read_or_write(self):
+        """Reading a honeytoken is point discovery (T0861); writing one is modifying a parameter (T0836)."""
+        ip = "10.20.30.41"
+        s_id = self.logger.start_session(ip, 50600, 1)
+        self.logger.log_request(s_id, 3, "Read Holding Registers", 40, 1, [1], 0.1, "SUCCESS", "HT_TAG", True, ip)
+        self.logger.log_request(s_id, 6, "Write Single Register", 40, 1, 0, 0.1, "SUCCESS", "HT_TAG", True, ip)
+        self.logger.flush()
+
+        techniques = sorted(a["mitre_technique"] for a in self.logger.get_recent_alerts(limit=100)
+                            if a["alert_type"] == "HONEYTOKEN_TRIGGER")
+        self.assertEqual(techniques, ["T0836: Modify Parameter", "T0861: Point & Tag Identification"])
+
     def test_read_only_mode_and_cleanup_stale_flag(self):
         """Read-only logger must not launch write worker thread and must not modify database."""
         ro_logger = EventLogger(self.db_path, read_only=True, cleanup_stale_sessions=False)

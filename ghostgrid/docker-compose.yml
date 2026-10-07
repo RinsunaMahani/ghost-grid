@@ -1,5 +1,8 @@
 services:
   # 1. GhostGrid OT Decoy (Modbus TCP server + physics simulation + background director)
+  # This is the only service visitors can reach, so it is the most locked down: unprivileged user,
+  # read-only filesystem except /data, no Linux capabilities, and fixed memory/CPU/process limits.
+  # No healthcheck on purpose: a probe would open a Modbus session and show up in the SOC log.
   ghostgrid-decoy:
     build:
       context: .
@@ -7,11 +10,12 @@ services:
     container_name: ghostgrid-decoy
     restart: unless-stopped
     ports:
-      # Exposed to OT network / monitored segment
-      - "502:502"
+      # Exposed to OT network / monitored segment. Visitors see port 502; inside, the
+      # unprivileged decoy listens on 5020.
+      - "502:5020"
     environment:
       - MODBUS_HOST=0.0.0.0
-      - MODBUS_PORT=502
+      - MODBUS_PORT=5020
       - MODBUS_UNIT_ID=1
       - GHOSTGRID_DB_PATH=/data/ghostgrid_soc.db
       - GHOSTGRID_STATE_PATH=/data/ghostgrid_state.json
@@ -19,9 +23,23 @@ services:
       - DIRECTOR_PROVIDER=ollama
       - DIRECTOR_ENDPOINT=http://ghostgrid-llm:11434
       - DIRECTOR_MODEL=qwen2.5:1.5b
+      # Forward every alert to the SOC's SIEM as it happens (see logging.siem in the site config):
+      # - GHOSTGRID_SYSLOG_HOST=10.0.50.10        # syslog collector; UDP is send-only
+      # - GHOSTGRID_SYSLOG_FORMAT=cef             # json or cef
+      # - GHOSTGRID_DECOY_NAME=ot-decoy-01        # how this decoy is named in the SIEM
+      # - GHOSTGRID_ALERTS_JSONL=/data/ghostgrid_alerts.jsonl   # for a log shipper reading the volume
     volumes:
       - shared-data:/data
       - ./config:/app/ghostgrid/config:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
     networks:
       - ot-network
       - internal-ai-network
@@ -45,10 +63,19 @@ services:
       - GHOSTGRID_IDENTITY_PATH=/data/ghostgrid_identity.json
       - STREAMLIT_SERVER_PORT=8501
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
-      - GHOSTGRID_ADMIN_PASSWORD=${GHOSTGRID_ADMIN_PASSWORD}
+      - GHOSTGRID_ADMIN_PASSWORD=${GHOSTGRID_ADMIN_PASSWORD:?set GHOSTGRID_ADMIN_PASSWORD before starting}
     volumes:
       - shared-data:/data:ro
       - ./config:/app/ghostgrid/config:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
     networks:
       - management-network
     depends_on:
@@ -57,11 +84,18 @@ services:
   # 3. Local AI Model Runtime (Ollama for background scenario direction)
   # STRICTLY internal: no host ports mapped to prevent adversary enumeration
   ghostgrid-llm:
-    image: ollama/ollama:latest
+    # Pinned to an exact release and its registry digest: an air-gapped site must not drift to
+    # whatever "latest" was on the day of the pull, and the digest guarantees the same image even
+    # if the tag were ever moved. To upgrade, set OLLAMA_IMAGE in ghostgrid/.env (see the README).
+    image: ${OLLAMA_IMAGE:-ollama/ollama:0.40.0@sha256:1bef639749741b375e9a1eb2c1346fb57ce52f5432de1f74846e44ccc18e1687}
     container_name: ghostgrid-llm
     restart: unless-stopped
     volumes:
       - ollama-data:/root/.ollama
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 4g
+    pids_limit: 512
     networks:
       - internal-ai-network
 

@@ -33,7 +33,9 @@ Pick a scenario in the sidebar, choose when the fault starts, and press **Start*
 - **Lap and delivery times:** the box's lap time and the monitor's delivery time on one chart, with the alarm limit both ends learned and the moment the fault started.
 - **Alarm feed:** every alarm as it is raised, marked with where it came from.
 
-A link like `http://localhost:8501/?start=ransomware&fault=3` starts that scenario as soon as the page opens. A run stops itself after the time chosen in the sidebar (two minutes for a link).
+A link like `http://localhost:8501/?start=ransomware&fault=3&length=60` starts that scenario as soon as the page opens; `fault` and `length` are in seconds and both optional. A run stops itself after the time chosen in the sidebar (two minutes for a link without `length`).
+
+After a `ransomware` run stops, the page shows the operator's side of the incident: the files that changed just before the freeze or now look encrypted, and a **Roll back and unfreeze** button. It does what the restore tool does on a real box: each file's last clean version becomes its newest version again, nothing is deleted, and the operator's name goes into the vault's log.
 
 | Scenario | What happens | What should catch it |
 |---|---|---|

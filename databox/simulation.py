@@ -1,7 +1,8 @@
-"""One run of the sealed-box simulation that can be started, watched and stopped.
+"""One run of the sealed-box simulation that can be started, watched, stopped and recovered.
 
 The command-line demo runs one for a fixed time; the live view keeps one running
-and reads its parts while it goes.
+and reads its parts while it goes. Stopping a run keeps its vault, so a frozen vault
+can still be reviewed and rolled back; closing the run deletes a temporary vault.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from .loop import ChainSigner, LapTimer
 from .monitor import Scoreboard
 from .report import Reporter
 from .sim import Battery, DiodeReceiver, DiodeSender, Faults, Track
-from .vault import Guard, Vault, VaultClosed, VaultFrozen, find_suspects, plant_canaries
+from .vault import Guard, Vault, VaultClosed, VaultFrozen, find_suspects, plant_canaries, restore_suspects
 
 SCENARIOS = {
     "normal": "Everything healthy. Expect no alarms.",
@@ -162,7 +163,8 @@ class Simulation:
         self.report = Reporter(out=out)
         self.kept_vault = vault_dir is not None
         self._vault_dir = vault_dir
-        self._stack = contextlib.ExitStack()
+        self._links = contextlib.ExitStack()     # the one-way links: closed when the run stops
+        self._storage = contextlib.ExitStack()   # a temporary vault: deleted only when the run is closed
         self._threads: list[threading.Thread] = []
         self._timers: list[threading.Timer] = []
         self._lock = threading.Lock()
@@ -171,6 +173,7 @@ class Simulation:
         self.started_wall: float | None = None
         self.stopped_mono: float | None = None
         self.suspects: list = []
+        self.restored: list = []                 # versions an operator rolled back after the run
         self.vault: Vault | None = None
         self.box: Box | None = None
         self.monitor: Scoreboard | None = None
@@ -180,8 +183,8 @@ class Simulation:
         with self._lock:
             if self.started_mono is not None:
                 raise RuntimeError("a simulation runs once; create a new one to run again")
-            stack = self._stack
-            vault_dir = self._vault_dir or stack.enter_context(tempfile.TemporaryDirectory(prefix="databox-"))
+            vault_dir = self._vault_dir or self._storage.enter_context(
+                tempfile.TemporaryDirectory(prefix="databox-", ignore_cleanup_errors=True))
             self.vault = vault = Vault(vault_dir, guard=Guard())
             if not vault.names():
                 seed_vault(vault, random.Random(7))
@@ -197,7 +200,7 @@ class Simulation:
             to_box = DiodeSender(box_returns.address, copies=1)
             to_monitors = [DiodeSender(monitor_in.address, copies=1)]
             for end in (box_returns, monitor_in, track_in, to_track, to_box, *to_monitors):
-                stack.callback(end.close)
+                self._links.callback(end.close)
 
             faults = Faults(start_after_s=self.fault_at_s)
             battery = Battery()
@@ -255,7 +258,36 @@ class Simulation:
                 self.report.info("vault", f"{s.name}: v{s.bad_version} {s.reason}; clean v{s.clean_version} is still in the vault")
             if self.suspects and self.kept_vault:
                 self.report.info("vault", f"review and roll back with: python -m databox.restore --vault {self._vault_dir}")
-            self._stack.close()
+            self._links.close()
+
+    def recover(self, operator: str) -> list:
+        """The operator's review after a freeze, as `python -m databox.restore --apply --unfreeze` does it.
+
+        Rolls each suspect file back to its last clean version (nothing is deleted: the damaged
+        versions stay as evidence), then unfreezes once no suspects remain. Only after the run has
+        stopped: in a real incident the infected source is cut off first, or its next encrypted
+        backup would freeze the vault again straight away.
+        """
+        with self._lock:
+            if self.running:
+                raise RuntimeError("stop the run first: the infected source is still sending backups")
+            if self.vault is None:
+                raise RuntimeError("the run hasn't started")
+            restored = restore_suspects(self.vault, operator)
+            self.suspects = find_suspects(self.vault)
+            if not self.suspects and self.vault.frozen:
+                self.vault.unfreeze(operator)
+            self.restored += restored
+            for v in restored:
+                self.report.info("vault", f"{operator} rolled {v.name} back: clean v{v.restored_from} "
+                                          f"is the newest again, stored as v{v.version}")
+            return restored
+
+    def close(self) -> None:
+        """Stops the run if needed and deletes its vault if it was a temporary one."""
+        self.stop()
+        with self._lock:
+            self._storage.close()
 
     # --- reading the run while it goes ----------------------------------
 
@@ -312,13 +344,15 @@ class Simulation:
             "battery_pct": battery.pct,
             "battery_hours": battery.hours_left,
             "alarm_counts": dict(self.report.counts),
+            "suspects": len(self.suspects),
+            "restored": len(self.restored),
         }
 
     def __enter__(self) -> Simulation:
         return self.start()
 
     def __exit__(self, *exc) -> None:
-        self.stop()
+        self.close()
 
 
 def run_scenario(

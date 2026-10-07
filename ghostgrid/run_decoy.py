@@ -5,7 +5,6 @@ import logging
 import os
 import signal
 import sys
-import time
 
 # Reconfigure standard streams to UTF-8 with replacement for Windows file redirection
 if hasattr(sys.stdout, "reconfigure"):
@@ -30,6 +29,7 @@ for p in (parent_dir, current_dir):
 from ghostgrid.config import load_config
 from ghostgrid.core.identity import generate_site_identity, save_identity, load_identity
 from ghostgrid.core.logger import EventLogger
+from ghostgrid.core.logger.forward import AlertForwarder
 from ghostgrid.profiles import create_profile
 from ghostgrid.core.state import StateEngine
 from ghostgrid.core.director.llm_client import LLMClient
@@ -53,7 +53,7 @@ def _safe_print(text: str = ""):
         print(text.encode(encoding, errors="replace").decode(encoding))
 
 
-def print_banner(cfg, identity):
+def print_banner(cfg, identity, siem: str = "off"):
     # Standard ASCII banner that renders identically across UTF-8, Windows cp1252, and ASCII log sinks
     _safe_print("\n" + "=" * 65)
     _safe_print(r"""
@@ -76,6 +76,7 @@ def print_banner(cfg, identity):
     _safe_print(f" Security Zone:    {identity.security_zone} | Code: {identity.location_code}")
     _safe_print(f" Event Database:   {cfg.logging.db_path}")
     _safe_print(f" AI Director:      {'Enabled (' + cfg.director.provider + ')' if cfg.director.enabled else 'Disabled'}")
+    _safe_print(f" SIEM Forwarding:  {siem}")
     _safe_print("=" * 65 + "\n")
 
 
@@ -113,15 +114,24 @@ async def main():
         )
         save_identity(identity, id_file)
 
-    print_banner(cfg, identity)
+    # 2. Initialize Event Logger (SQLite with background batch queue and stale session cleanup on decoy start),
+    #    forwarding each alert to the SOC's SIEM when configured
+    forwarder = AlertForwarder(
+        jsonl_path=cfg.logging.alerts_jsonl_path,
+        syslog_host=cfg.logging.syslog_host,
+        syslog_port=cfg.logging.syslog_port,
+        syslog_format=cfg.logging.syslog_format,
+        decoy_name=cfg.logging.decoy_name,
+    )
+    print_banner(cfg, identity, siem=forwarder.describe())
 
-    # 2. Initialize Event Logger (SQLite with background batch queue and stale session cleanup on decoy start)
     event_logger = EventLogger(
         db_path=cfg.logging.db_path,
         alert_threshold_writes=cfg.logging.alert_threshold_writes,
         alert_threshold_scans=cfg.logging.alert_threshold_scans,
         honeytoken_registers=cfg.logging.honeytoken_registers,
         cleanup_stale_sessions=True,
+        alert_forwarder=forwarder if forwarder.enabled else None,
     )
 
     # 3. Create Sector Physics Profile
@@ -169,6 +179,9 @@ async def main():
         event_logger=event_logger,
         response_delay_ms=cfg.modbus.response_delay_ms,
         allow_broadcast=cfg.modbus.allow_broadcast,
+        max_clients=cfg.modbus.max_clients,
+        max_clients_per_ip=cfg.modbus.max_clients_per_ip,
+        idle_timeout_s=cfg.modbus.idle_timeout_s,
     )
 
     stop_event = asyncio.Event()

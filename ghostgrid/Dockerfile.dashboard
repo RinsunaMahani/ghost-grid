@@ -2,21 +2,33 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy ghostgrid source tree into /app/ghostgrid
 COPY . /app/ghostgrid
 
+# Run as an unprivileged user, the same UID as the decoy image, so the shared /data volume works.
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin ghostgrid \
+    && mkdir -p /data && chown ghostgrid:ghostgrid /data
+USER 10001
+
 EXPOSE 8501
 
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONPATH=/app
+# The root filesystem is read-only; Streamlit keeps its small files under $HOME, which is a tmpfs.
+ENV HOME=/tmp
 ENV STREAMLIT_SERVER_PORT=8501
 ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV STREAMLIT_SERVER_HEADLESS=true
+# Air-gapped by design: never try to send usage statistics.
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+# An operator console, not a development server: hide the developer menu and its "Deploy" button.
+ENV STREAMLIT_CLIENT_TOOLBAR_MODE=viewer
 
-CMD ["streamlit", "run", "/app/ghostgrid/dashboard/app.py"]
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4)"
+
+CMD ["python", "-m", "streamlit", "run", "/app/ghostgrid/dashboard/app.py"]

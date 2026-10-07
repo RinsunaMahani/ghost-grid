@@ -14,19 +14,17 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import logging
-import os
 import struct
 import sys
 import time
-from typing import Optional, Set
-from ghostgrid.core.identity import SiteIdentity, RegisterType, TagDefinition
+from typing import Dict, Optional, Set
+from ghostgrid.core.identity import SiteIdentity, TagDefinition
 from ghostgrid.core.state import StateEngine
 from ghostgrid.core.logger import EventLogger
 from ghostgrid.core.protocol.frames import (
     ModbusFunction,
     ModbusException,
     parse_mbap_header,
-    build_mbap_header,
     build_exception_response,
     build_read_bits_response,
     build_read_words_response,
@@ -58,6 +56,9 @@ class ModbusServer:
         event_logger: EventLogger,
         response_delay_ms: int = 2,
         allow_broadcast: bool = False,
+        max_clients: int = 64,
+        max_clients_per_ip: int = 16,
+        idle_timeout_s: float = 1800.0,
     ):
         self.host = host
         self.port = port
@@ -67,11 +68,18 @@ class ModbusServer:
         self.logger = event_logger
         self.response_delay_ms = response_delay_ms
         self.allow_broadcast = allow_broadcast
+        # Resource ceilings: one visitor opening thousands of sockets must not exhaust the decoy.
+        # Real PLCs also have a small, fixed connection table and drop connections beyond it.
+        self.max_clients = max_clients
+        self.max_clients_per_ip = max_clients_per_ip
+        # Long on purpose: keeping a visitor connected is the point, but abandoned sockets must not pile up.
+        self.idle_timeout_s = idle_timeout_s
 
         self._server: Optional[asyncio.Server] = None
         self._running = False
         self._client_tasks: Set[asyncio.Task] = set()
         self._active_writers: Set[asyncio.StreamWriter] = set()
+        self._clients_per_ip: Dict[str, int] = {}
 
     async def start(self):
         """Start listening on the configured Modbus TCP socket."""
@@ -111,14 +119,27 @@ class ModbusServer:
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle an individual incoming attacker or scanner connection."""
+        peer = writer.get_extra_info("peername")
+        client_ip = peer[0] if peer else "unknown"
+        client_port = peer[1] if peer else 0
+
+        if (len(self._active_writers) >= self.max_clients
+                or self._clients_per_ip.get(client_ip, 0) >= self.max_clients_per_ip):
+            logger.warning("[!] Connection limit reached, refusing %s:%d (%d open, %d from this address)",
+                           client_ip, client_port, len(self._active_writers),
+                           self._clients_per_ip.get(client_ip, 0))
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
+
         current_task = asyncio.current_task()
         if current_task:
             self._client_tasks.add(current_task)
         self._active_writers.add(writer)
-
-        peer = writer.get_extra_info("peername")
-        client_ip = peer[0] if peer else "unknown"
-        client_port = peer[1] if peer else 0
+        self._clients_per_ip[client_ip] = self._clients_per_ip.get(client_ip, 0) + 1
 
         session_id = self.logger.start_session(client_ip, client_port, self.unit_id)
         logger.info("[+] New Modbus connection: %s:%d (Session %s)", client_ip, client_port, session_id[:8])
@@ -126,7 +147,11 @@ class ModbusServer:
         try:
             while self._running:
                 try:
-                    header_bytes = await reader.readexactly(7)
+                    header_bytes = await asyncio.wait_for(reader.readexactly(7), self.idle_timeout_s)
+                except asyncio.TimeoutError:
+                    logger.info("[-] Idle timeout: %s:%d sent nothing for %.0f s", client_ip, client_port,
+                                self.idle_timeout_s)
+                    break
                 except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.CancelledError):
                     break
 
@@ -145,8 +170,9 @@ class ModbusServer:
                 # CRITICAL: Always read PDU bytes completely BEFORE evaluating unit ID
                 # so the TCP stream is never desynchronized on broadcast or filtered packets
                 try:
-                    pdu_bytes = await reader.readexactly(pdu_len)
-                except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.CancelledError):
+                    pdu_bytes = await asyncio.wait_for(reader.readexactly(pdu_len), self.idle_timeout_s)
+                except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionResetError,
+                        asyncio.CancelledError):
                     break
 
                 # Broadcast handling: Unit 0 is Modbus broadcast (standard Modbus never returns response)
@@ -155,9 +181,8 @@ class ModbusServer:
                         self._process_pdu(trans_id, req_unit_id, pdu_bytes, session_id, client_ip)
                     continue
 
-                t_start = time.perf_counter()
+                # _process_pdu logs each request with its own processing time.
                 resp_bytes = self._process_pdu(trans_id, req_unit_id, pdu_bytes, session_id, client_ip)
-                latency_ms = (time.perf_counter() - t_start) * 1000.0
 
                 if self.response_delay_ms > 0:
                     await asyncio.sleep(self.response_delay_ms / 1000.0)
@@ -175,6 +200,11 @@ class ModbusServer:
         finally:
             self.logger.end_session(session_id)
             self._active_writers.discard(writer)
+            remaining = self._clients_per_ip.get(client_ip, 1) - 1
+            if remaining > 0:
+                self._clients_per_ip[client_ip] = remaining
+            else:
+                self._clients_per_ip.pop(client_ip, None)
             if current_task:
                 self._client_tasks.discard(current_task)
             try:

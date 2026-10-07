@@ -1,5 +1,4 @@
 """Lifecycle integration tests for the GhostGrid decoy process."""
-import asyncio
 import os
 import struct
 import subprocess
@@ -169,7 +168,7 @@ class TestDecoyLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
             db_path = os.path.join(tmp_dir, "handle_test.db")
             logger = EventLogger(db_path=db_path)
-            s_id = logger.start_session("10.0.0.1", 50000, 1)
+            logger.start_session("10.0.0.1", 50000, 1)
             logger.flush()
             metrics = logger.get_soc_metrics()
             self.assertIsInstance(metrics, dict)

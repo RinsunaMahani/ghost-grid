@@ -2,30 +2,25 @@
 
 Background autonomous process that periodically updates operational storylines,
 adds subtle realistic process drift, and logs narrative events to the SOC database.
-Validates all adjustments for type and range before applying to prevent corrupt state.
-Guarantees that the director never flips command coils or safety trips.
+Only allow-listed operational setpoints can change, each inside a plausible operating range
+(see limits.py), so the director can never flip a command coil, cause a safety trip, or move an
+alarm limit or protection setting that would trip something indirectly.
 """
 import logging
 import threading
 import time
-from typing import Dict, Any, Optional
+from typing import Optional
 from ghostgrid.core.identity import SiteIdentity, RegisterType
 from ghostgrid.core.state import StateEngine
 from ghostgrid.core.logger import EventLogger
+from ghostgrid.core.director.limits import allowed_range
 from ghostgrid.core.director.llm_client import LLMClient
 
 logger = logging.getLogger("ghostgrid.director")
 
-# Critical command coils and safety interlocks that the director is strictly forbidden to flip
-DISALLOWED_DIRECTOR_TAGS = {
-    "PUMP_1_CMD", "PUMP_2_CMD", "EMERGENCY_SHUTDOWN_CMD", "OUTLET_VALVE_CMD",
-    "CHLORINE_DOSING_CMD", "INCOMING_BREAKER_CMD", "FEEDER_1_BREAKER_CMD",
-    "FEEDER_2_BREAKER_CMD", "BUS_COUPLER_CMD", "AUTO_RECLOSE_ARMED",
-    "PUMP_1_RUNNING", "PUMP_2_RUNNING", "OUTLET_VALVE_OPEN", "CHLORINE_DOSING_ACTIVE",
-    "HIGH_LEVEL_TRIP", "LOW_LEVEL_TRIP", "DRY_RUN_TRIP", "EMERGENCY_SHUTDOWN_ACTIVE",
-    "INCOMING_BREAKER_CLOSED", "FEEDER_1_CLOSED", "FEEDER_2_CLOSED", "BUS_COUPLER_CLOSED",
-    "OVERCURRENT_TRIP", "EARTH_FAULT_TRIP", "UNDERFREQUENCY_STAGE1_TRIP", "BUCHHOLZ_GAS_ALARM",
-}
+# Storyline text from a local model is shown on the SOC console; keep it to log-entry length.
+MAX_TITLE_CHARS = 120
+MAX_NARRATIVE_CHARS = 600
 
 
 class ScenarioDirector:
@@ -109,34 +104,39 @@ class ScenarioDirector:
                 has_recent_activity=has_recent_activity,
             )
 
-            title = storyline.get("title", "Standard SCADA Supervisory Loop")
-            narrative = storyline.get("narrative", "Routine telemetry polling across all drop points.")
-            adjustments = storyline.get("adjustments", {})
+            # A local model can return anything: keep the text short and plain, and ignore
+            # adjustments that aren't a mapping.
+            title = str(storyline.get("title") or "Standard SCADA Supervisory Loop")[:MAX_TITLE_CHARS]
+            narrative = str(storyline.get("narrative")
+                            or "Routine telemetry polling across all drop points.")[:MAX_NARRATIVE_CHARS]
+            adjustments = storyline.get("adjustments")
+            if not isinstance(adjustments, dict):
+                adjustments = {}
 
-            # 4. Safely apply non-destructive operational adjustments with strict validation
+            # 4. Apply only allowed setpoint changes, each inside its operating range
+            applied = {}
             for tag_name, val in adjustments.items():
-                if tag_name in DISALLOWED_DIRECTOR_TAGS:
-                    logger.debug("Scenario Director blocked from modifying critical tag '%s'", tag_name)
-                    continue
-
+                band = allowed_range(self.identity.sector, tag_name)
                 tag = self.identity.tags.get(tag_name)
-                if not tag or tag.is_honeytoken or tag.read_only:
+                # Defence in depth: the allow-list only names setpoints, but check the tag itself too.
+                if (band is None or not tag or tag.is_honeytoken or tag.read_only
+                        or tag.reg_type != RegisterType.HOLDING_REGISTER):
+                    logger.debug("Scenario Director may not change '%s'; ignored", tag_name)
                     continue
-
-                # Director is only permitted to adjust holding registers (setpoints, thresholds, tap positions)
-                if tag.reg_type != RegisterType.HOLDING_REGISTER:
-                    logger.debug("Scenario Director skipped non-holding-register tag '%s'", tag_name)
-                    continue
-
                 try:
                     clean_val = int(val)
-                    if 0 <= clean_val <= 65535:
-                        self.state.update_tag_value(tag_name, clean_val)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, OverflowError):
                     continue
+                lowest, highest = band
+                if not lowest <= clean_val <= highest:
+                    logger.debug("Scenario Director value %s for '%s' is outside %s-%s; ignored",
+                                 clean_val, tag_name, lowest, highest)
+                    continue
+                self.state.update_tag_value(tag_name, clean_val)
+                applied[tag_name] = clean_val
 
-            # 5. Persist storyline in database for SOC dashboard
-            self.logger.log_storyline(title, narrative, adjustments)
+            # 5. Persist the storyline and what actually changed, for the SOC dashboard
+            self.logger.log_storyline(title, narrative, applied)
             logger.info("Scenario Director updated storyline: '%s'", title)
 
         except Exception as e:

@@ -57,6 +57,33 @@ def test_missing_frame_shows_as_a_gap():
     assert kinds(verifier.check(f3)) == ["gap"]
 
 
+def test_altered_frame_is_not_reported_again_as_a_gap():
+    """The bad-signature alarm already covers it: the next genuine frame mustn't add a second alarm."""
+    verifier = ChainVerifier(KEY.public_key())
+    f1, f2, f3 = frames(3)
+    verifier.check(f1)
+    assert kinds(verifier.check(replace(f2, payload=b'{"n":99}'))) == ["bad signature"]
+    check = verifier.check(f3)
+    assert check.accepted and not check.problems
+
+
+def test_second_copy_of_an_altered_frame_is_one_alarm_not_two():
+    verifier = ChainVerifier(KEY.public_key())
+    bad = replace(frames(1)[0], payload=b'{"n":99}')
+    assert kinds(verifier.check(bad)) == ["bad signature"]
+    again = verifier.check(bad)
+    assert again.duplicate and not again.problems
+
+
+def test_gap_still_counts_frames_that_were_never_seen():
+    verifier = ChainVerifier(KEY.public_key())
+    f1, f2, _, f4 = frames(4)
+    verifier.check(f1)
+    verifier.check(replace(f2, payload=b'{"n":99}'))       # #2 altered and reported; #3 simply lost
+    check = verifier.check(f4)
+    assert kinds(check) == ["gap"] and check.problems[0][1].startswith("1 frame(s)")
+
+
 def test_valid_signature_but_wrong_link_is_a_chain_break():
     verifier = ChainVerifier(KEY.public_key())
     f1 = frames(1)[0]

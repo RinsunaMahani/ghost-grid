@@ -59,20 +59,38 @@ class ChainVerifier:
         self._last_seq = 0
         self._last_hash = GENESIS
         self._seen: OrderedDict[bytes, float] = OrderedDict()   # digest -> when accepted
+        # Numbers claimed by frames that failed the signature check. A gap made only of these was
+        # already alarmed as "bad signature", so it isn't reported a second time. The claimed number
+        # can't be trusted, but faking one to hide a real gap raises its own bad-signature alarm.
+        self._rejected: OrderedDict[int, None] = OrderedDict()
+        self._bad_seen: OrderedDict[bytes, float] = OrderedDict()   # digest of a bad frame -> when seen
 
     def check(self, frame: Frame) -> Check:
         result = Check(frame)
         try:
             self._pub.verify(frame.signature, frame.body())
         except InvalidSignature:
+            # The link sends every frame twice, so an identical bad frame straight after is the same alarm.
+            digest, now = frame.digest(), time.monotonic()
+            seen_at = self._bad_seen.get(digest)
+            if seen_at is not None and now - seen_at < self.duplicate_window_s:
+                result.duplicate = True
+                return result
+            self._bad_seen[digest] = now
             result.problems.append(("bad signature", f"#{frame.seq} was forged or altered in transit"))
+            self._rejected[frame.seq] = None
+            for memo in (self._rejected, self._bad_seen):
+                while len(memo) > self._memory:
+                    memo.popitem(last=False)
             return result
 
         now = time.monotonic()
         digest = frame.digest()
         seen_at = self._seen.get(digest)
         if seen_at is not None:
-            if now - seen_at <= self.duplicate_window_s:
+            # Strictly inside the window: on Windows before Python 3.13 the clock only ticks every
+            # ~15 ms, so a zero-length window must still treat a same-tick repeat as a replay.
+            if now - seen_at < self.duplicate_window_s:
                 result.duplicate = True
             else:
                 result.problems.append(("replay", f"#{frame.seq} seen again {now - seen_at:.1f}s later"))
@@ -82,13 +100,16 @@ class ChainVerifier:
             return result
 
         if self._last_seq and frame.seq > self._last_seq + 1:
-            missing = frame.seq - self._last_seq - 1
-            result.problems.append(("gap", f"{missing} frame(s) missing before #{frame.seq}"))
+            unexplained = sum(1 for s in range(self._last_seq + 1, frame.seq) if s not in self._rejected)
+            if unexplained:
+                result.problems.append(("gap", f"{unexplained} frame(s) missing before #{frame.seq}"))
         elif (self._last_seq or frame.seq == 1) and frame.prev_hash != self._last_hash:
             result.problems.append(("chain break", f"#{frame.seq} does not link to the previous frame"))
         # A monitor that starts mid-stream simply syncs to the first genuine frame it sees.
 
         self._last_seq, self._last_hash = frame.seq, digest
+        for s in [s for s in self._rejected if s <= frame.seq]:
+            del self._rejected[s]
         self._seen[digest] = now
         while len(self._seen) > self._memory:
             self._seen.popitem(last=False)

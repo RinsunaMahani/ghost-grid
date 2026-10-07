@@ -5,7 +5,6 @@ Guarantees sub-millisecond thread-safe access so that the Modbus protocol fronte
 never waits on disk I/O, an LLM, or complex computation.
 Strict address checking: returns None for unmapped addresses so Modbus returns 0x02.
 """
-import asyncio
 import json
 import logging
 import os

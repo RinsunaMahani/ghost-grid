@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest versions the project says it supports, so that claim stays true...
+          - python-version: "3.11"
+            streamlit: "streamlit==1.52.0"
+          # ...and the newest, to catch breaking changes early.
+          - python-version: "3.13"
+            streamlit: "streamlit"
+    name: Python ${{ matrix.python-version }}, ${{ matrix.streamlit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          pip install -e ".[all]"
+          pip install --upgrade "${{ matrix.streamlit }}"
+      - name: Lint (undefined names, unused imports, syntax errors)
+        run: ruff check ghostgrid databox --select F,E9
+      - name: Run tests
+        run: python -m pytest -q

@@ -1,7 +1,7 @@
 """Modbus TCP Frame encoding and decoding utilities."""
 import struct
 from enum import IntEnum
-from typing import Tuple, Optional, List, Dict, Any
+from typing import Tuple, Optional, List, Dict
 
 
 class ModbusFunction(IntEnum):

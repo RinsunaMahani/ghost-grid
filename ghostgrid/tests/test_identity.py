@@ -47,6 +47,23 @@ class TestIdentity(unittest.TestCase):
             valid_ouis = VENDOR_OUIS.get(vendor, [])
             self.assertIn(oui_part, valid_ouis, f"Vendor {vendor} MAC {ident.mac_address} has invalid OUI {oui_part}")
 
+    def test_occupied_address_set_differs_between_installs(self):
+        """A scanner mapping which addresses answer must not see the same layout on every decoy."""
+        for sector in ("water", "power"):
+            layouts = set()
+            for i in range(50):
+                ident = generate_site_identity(sector=sector, seed=f"layout-{sector}-{i}")
+                layouts.add(tuple(sorted((t.reg_type.value, t.address)
+                                         for t in ident.tags.values() if not t.is_honeytoken)))
+            self.assertGreater(len(layouts), 45, f"{sector}: only {len(layouts)} distinct address sets in 50 installs")
+
+    def test_no_two_tags_share_an_address(self):
+        for sector in ("water", "power"):
+            for i in range(100):
+                ident = generate_site_identity(sector=sector, seed=f"unique-{sector}-{i}")
+                keys = [(t.reg_type, t.address) for t in ident.tags.values()]
+                self.assertEqual(len(keys), len(set(keys)), f"{sector} seed {i} has overlapping addresses")
+
     def test_neutral_fictional_facility_names_across_seeds(self):
         """Default generated facility names must be neutral and not impersonate real utilities or real facilities."""
         real_names = [

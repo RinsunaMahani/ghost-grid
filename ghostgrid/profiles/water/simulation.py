@@ -7,7 +7,6 @@ Models bulk water treatment and pumping station hydraulic dynamics:
 - Setpoint-driven dynamics: pressure regulator & SANS 241 dosing track setpoints
 - Dry-run protection switch aligns with LOW_LEVEL_ALARM_LIMIT register
 """
-import math
 import random
 from typing import Dict, Any
 from ghostgrid.profiles.base import SectorProfile

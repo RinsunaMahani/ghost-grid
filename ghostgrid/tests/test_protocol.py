@@ -162,6 +162,53 @@ class TestProtocolAndServer(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await writer.wait_closed()
 
+    async def _read_holding(self, reader, writer) -> int:
+        addr = self.identity.tags["LEVEL_SETPOINT_PCT"].address
+        writer.write(struct.pack(">HHHB", 0x0001, 0x0000, 0x0006, 0x01)
+                     + struct.pack(">BHH", ModbusFunction.READ_HOLDING_REGISTERS, addr, 1))
+        await writer.drain()
+        hdr = await asyncio.wait_for(reader.readexactly(7), 2.0)
+        pdu = await asyncio.wait_for(reader.readexactly(struct.unpack(">HHHB", hdr)[2] - 1), 2.0)
+        return pdu[0]
+
+    async def test_connections_beyond_the_per_address_limit_are_refused(self):
+        """One address can't hold more than its share of connections; a freed slot is reusable."""
+        self.server.max_clients_per_ip = 2
+        conns = [await asyncio.open_connection("127.0.0.1", self.port) for _ in range(2)]
+        await asyncio.sleep(0.1)                      # let the server register both
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        self.assertEqual(await asyncio.wait_for(reader.read(1), 2.0), b"", "the third connection must be closed")
+        writer.close()
+
+        for r, w in conns:                            # the accepted ones still work
+            self.assertEqual(await self._read_holding(r, w), ModbusFunction.READ_HOLDING_REGISTERS)
+
+        conns[0][1].close()
+        await conns[0][1].wait_closed()
+        await asyncio.sleep(0.1)
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        self.assertEqual(await self._read_holding(reader, writer), ModbusFunction.READ_HOLDING_REGISTERS,
+                         "a slot freed by a closed connection must be usable again")
+        for _, w in [conns[1], (reader, writer)]:
+            w.close()
+
+    async def test_overall_connection_limit(self):
+        self.server.max_clients = 1
+        r1, w1 = await asyncio.open_connection("127.0.0.1", self.port)
+        await asyncio.sleep(0.1)
+        r2, w2 = await asyncio.open_connection("127.0.0.1", self.port)
+        self.assertEqual(await asyncio.wait_for(r2.read(1), 2.0), b"")
+        self.assertEqual(await self._read_holding(r1, w1), ModbusFunction.READ_HOLDING_REGISTERS)
+        w1.close()
+        w2.close()
+
+    async def test_silent_connection_is_closed_after_the_idle_timeout(self):
+        self.server.idle_timeout_s = 0.3
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+        self.assertEqual(await asyncio.wait_for(reader.read(1), 3.0), b"", "an idle connection must be closed")
+        writer.close()
+
 
 if __name__ == "__main__":
     unittest.main()

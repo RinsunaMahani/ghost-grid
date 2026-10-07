@@ -1,10 +1,8 @@
 """Unit tests for GhostGrid physical simulations and state engine."""
-import time
 import unittest
 from ghostgrid.core.identity import generate_site_identity
 from ghostgrid.profiles.water.simulation import WaterProfile
 from ghostgrid.profiles.power.simulation import PowerProfile
-from ghostgrid.core.state.engine import StateEngine
 
 
 class TestStateAndPhysics(unittest.TestCase):
@@ -23,13 +21,18 @@ class TestStateAndPhysics(unittest.TestCase):
         state["EMERGENCY_SHUTDOWN_CMD"] = 0
 
         # Simulate 12 hours (43,200 seconds) in 1-second steps
-        for _ in range(43200):
+        # Pump 1 cycles on and off around the setpoint, so whether it runs at one given second
+        # is down to timing. Count how long it ran over the last hour instead.
+        ran = 0
+        for i in range(43200):
             state = profile.step(dt=1.0, current_state=state)
+            if i >= 43200 - 3600:
+                ran += state["PUMP_1_RUNNING"]
 
         final_level = state["RESERVOIR_LEVEL_PCT"]
         # Level should be tightly controlled around 80.0% (between 78.0% and 82.0%), not 100% and not empty!
         self.assertTrue(780 <= final_level <= 820, f"Reservoir level not controlled: {final_level / 10.0}%")
-        self.assertEqual(state["PUMP_1_RUNNING"], 1)
+        self.assertGreater(ran, 0, "Pump 1 never ran in the last hour, so the level isn't being controlled")
         self.assertEqual(state["RESERVOIR_HIGH_SWITCH"], 0)
         self.assertEqual(state["RESERVOIR_LOW_SWITCH"], 0)
         self.assertEqual(state["PUMP_1_TRIP"], 0)
